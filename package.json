@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "cli": "tsx src/cli.ts",
     "db:migrate": "tsx src/db/migrate.ts",
     "test": "vitest run",

@@ -74,7 +74,7 @@ describe("rule 2: all or nothing", () => {
       {
         afterDebit: async (client) => {
           const { rows } = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
-          // Kill our own backend from outside, as if the app server or the
+          // Kill our own backend from outside, as if the CLI process or the
           // network died mid-transfer.
           await observer.query("SELECT pg_terminate_backend($1)", [rows[0]!.pid]);
         },

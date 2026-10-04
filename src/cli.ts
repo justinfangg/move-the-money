@@ -37,8 +37,10 @@ Environment:
                  (default postgres://localhost:5432/move_money)
 
 Exit codes:
-  0 success   1 refused (insufficient funds, not found, key conflict)
-  2 bad usage   3 unexpected error
+  0 success
+  1 refused (insufficient funds, not found, key conflict, balance limit)
+  2 bad usage
+  3 unexpected error
 `;
 
 export const EXIT = { ok: 0, refused: 1, usage: 2, error: 3 } as const;
@@ -49,11 +51,20 @@ export interface Io {
 }
 
 export async function run(argv: string[], pool: pg.Pool, io: Io): Promise<number> {
+  // "-5" would otherwise be reported as an unknown option, which is true
+  // but unhelpful: what the user typed was a negative amount.
+  const negative = argv.find((a) => /^-[0-9.]/.test(a));
+  if (negative !== undefined) {
+    io.err(`error: amounts can't be negative (got ${negative})`);
+    return EXIT.usage;
+  }
+
   let args: ReturnType<typeof parse>;
   try {
     args = parse(argv);
   } catch (err) {
-    io.err(`error: ${(err as Error).message}\n\n${USAGE}`);
+    const message = (err as Error).message.split(". ")[0]!;
+    io.err(`error: ${message}\nRun "move-money --help" for usage.`);
     return EXIT.usage;
   }
   const { positionals, values } = args;

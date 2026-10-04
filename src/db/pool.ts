@@ -1,7 +1,7 @@
 import pg from "pg";
 
 // node-postgres returns BIGINT (OID 20) as a string by default, precisely
-// because a JS number can't hold every int8. We want plain numbers in the API,
+// because a JS number can't hold every int8. We want plain numbers in the code,
 // so convert — but refuse rather than silently round if a value is ever
 // outside the safe-integer range. The schema caps balances at
 // MAX_SAFE_INTEGER, so this should be unreachable; it's here so that if it

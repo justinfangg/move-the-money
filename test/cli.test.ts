@@ -44,10 +44,18 @@ describe("open", () => {
     expect(res.json.account.balance_cents).toBe(29);
   });
 
-  it.each(["-5", "10.555", "1e3", "$5", "ten"])("refuses %s as an amount, and creates nothing", async (amount) => {
+  it.each(["10.555", "1e3", "$5", "ten"])("refuses %s as an amount, and creates nothing", async (amount) => {
     const res = await cli("open", amount);
     expect(res.code).toBe(EXIT.usage);
     expect(res.err).toMatch(/at most two decimal places/);
+    const { rows } = await pool.query("SELECT count(*) AS n FROM accounts");
+    expect(rows[0].n).toBe(0);
+  });
+
+  it.each(["-5", "-0.01", "-.5"])("says a negative amount (%s) is negative, not an unknown option", async (amount) => {
+    const res = await cli("open", amount);
+    expect(res.code).toBe(EXIT.usage);
+    expect(res.err).toBe(`error: amounts can't be negative (got ${amount})`);
     const { rows } = await pool.query("SELECT count(*) AS n FROM accounts");
     expect(rows[0].n).toBe(0);
   });
@@ -178,6 +186,12 @@ describe("usage", () => {
     const res = await cli("--help");
     expect(res.code).toBe(EXIT.ok);
     expect(res.out).toMatch(/^move-money:/);
+  });
+
+  it("reports an unknown flag in one line, with a pointer to --help", async () => {
+    const res = await cli("balance", "x", "--force");
+    expect(res.code).toBe(EXIT.usage);
+    expect(res.err).toBe(`error: Unknown option '--force'\nRun "move-money --help" for usage.`);
   });
 
   it("rejects unknown commands, unknown flags and wrong argument counts", async () => {
