@@ -59,9 +59,15 @@ export async function assertInvariants(pool: pg.Pool): Promise<void> {
   expect(lopsided.rows, "transfers that aren't a matched debit/credit pair").toEqual([]);
 
   // Rule 4: no money created or destroyed. Total held == total ever deposited.
-  const totals = await pool.query<{ held: number; opened: number }>(`
-    SELECT (SELECT COALESCE(SUM(balance_cents), 0)::bigint FROM accounts) AS held,
-           (SELECT COALESCE(SUM(amount_cents), 0)::bigint
-              FROM ledger_entries WHERE kind = 'opening')               AS opened`);
-  expect(totals.rows[0]!.held, "total money held vs. total money opened").toBe(totals.rows[0]!.opened);
+  // Each balance fits in a JS number, but the sum across accounts needn't, so
+  // fetch the totals as text and compare as BigInt. (Fetching them as int8
+  // here makes the pool's type parser throw, which is the parser doing its
+  // job.)
+  const totals = await pool.query<{ held: string; opened: string }>(`
+    SELECT (SELECT COALESCE(SUM(balance_cents), 0)::text FROM accounts) AS held,
+           (SELECT COALESCE(SUM(amount_cents), 0)::text
+              FROM ledger_entries WHERE kind = 'opening')             AS opened`);
+  expect(BigInt(totals.rows[0]!.held), "total money held vs. total money opened").toBe(
+    BigInt(totals.rows[0]!.opened),
+  );
 }
