@@ -35,4 +35,3 @@ Testing the CLI by hand also caught smaller things the tests hadn't: `-5` report
 - **The tests wipe their database.** Each test runs `TRUNCATE` on its tables. If `TEST_DATABASE_URL` pointed at real data, the tests would delete it. There is no guard against that.
 - **Failed transfers don't use up their idempotency key.** A retry after the account is funded succeeds. That's tested and deliberate, but a client might expect "retry" to give the original answer.
 - **Keys never expire, and there's no `lock_timeout`.** A process that hangs mid-transfer holds its row locks until the connection dies.
-- **A busy account is a bottleneck.** Transfers from one account run one at a time. That's correct, but I haven't measured how slow it gets.
