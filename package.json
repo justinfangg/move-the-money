@@ -7,6 +7,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "cli": "tsx src/cli.ts",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "db:migrate": "tsx src/db/migrate.ts",
@@ -25,5 +27,8 @@
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^3.2.7"
+  },
+  "bin": {
+    "move-money": "dist/cli.js"
   }
 }

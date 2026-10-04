@@ -58,3 +58,34 @@ export function requireCents(value: unknown, field: string, min: number): number
   }
   return value === 0 ? 0 : value; // normalise -0
 }
+
+const DOLLAR_AMOUNT = /^(0|[1-9][0-9]*)(?:\.([0-9]{1,2}))?$/;
+
+/**
+ * Parse a human-typed dollar amount ("25", "25.5", "25.50") into integer
+ * cents, using string and BigInt arithmetic only: Number("0.29") * 100 is
+ * 28.999999999999996, so the obvious one-liner is wrong.
+ *
+ * Anything that can't be represented exactly in cents is refused, never
+ * rounded: "25.555", "1e3", "-5", "$5", "1,000", ".5".
+ */
+export function parseAmount(text: string, field = "amount"): number {
+  const match = DOLLAR_AMOUNT.exec(text);
+  if (!match) {
+    throw new ValidationError(
+      `${field} must be a dollar amount with at most two decimal places, like 25 or 25.50 (got "${text}")`,
+    );
+  }
+  const cents = BigInt(match[1]!) * 100n + BigInt((match[2] ?? "").padEnd(2, "0"));
+  if (cents > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new ValidationError(`${field} is too large`);
+  }
+  return Number(cents);
+}
+
+/** Format integer cents as dollars, e.g. -2550 => "-25.50". Exact. */
+export function formatCents(cents: number): string {
+  const sign = cents < 0 ? "-" : "";
+  const abs = Math.abs(cents);
+  return `${sign}${Math.trunc(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
+}
