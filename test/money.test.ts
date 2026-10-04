@@ -24,9 +24,10 @@ describe("requireCents", () => {
   });
 
   it("enforces the minimum", () => {
-    expect(() => requireCents(0, "amount_cents", 1)).toThrow(/at least 1/);
-    expect(() => requireCents(-5, "amount_cents", 1)).toThrow(/at least 1/);
-    expect(() => requireCents(-1, "initial_balance_cents", 0)).toThrow(/at least 0/);
+    expect(() => requireCents(0, "amount", 1)).toThrow("amount must be at least 0.01 (1 cent)");
+    expect(() => requireCents(-5, "amount", 1)).toThrow("amount must be at least 0.01 (1 cent)");
+    expect(() => requireCents(50, "amount", 100)).toThrow("amount must be at least 1.00 (100 cents)");
+    expect(() => requireCents(-1, "initial balance", 0)).toThrow("initial balance can't be negative");
   });
 });
 

@@ -147,6 +147,8 @@ describe("transfer", () => {
       const res = await cli("transfer", a, b, amount, "--key", `bad-${amount}`);
       expect(res.code, amount).toBe(EXIT.usage);
     }
+    const zero = await cli("transfer", a, b, "0.00", "--key", "zero");
+    expect(zero.err).toBe("error: amount must be at least 0.01 (1 cent)");
     const self = await cli("transfer", a, a, "1", "--key", "self");
     expect(self.code).toBe(EXIT.usage);
     const { rows } = await pool.query("SELECT count(*) AS n FROM transfers");

@@ -23,7 +23,13 @@ export function requireCents(value: unknown, field: string, min: number): number
     throw new ValidationError(`${field} is too large`);
   }
   if (value < min) {
-    throw new ValidationError(`${field} must be at least ${min}`);
+    // Say it in dollars as well as cents: CLI users type dollars, and "must be
+    // at least 1" after typing "0" reads as "at least one dollar".
+    throw new ValidationError(
+      min === 0
+        ? `${field} can't be negative`
+        : `${field} must be at least ${formatCents(min)} (${min} cent${min === 1 ? "" : "s"})`,
+    );
   }
   return value === 0 ? 0 : value; // normalise -0
 }
