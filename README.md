@@ -140,7 +140,8 @@ The full story, with how to reproduce each failure, is in [BUILD_LOG.md](BUILD_L
 | The property test passed with an off-by-one (`balance <= amount`). | Deliberately introducing that bug and seeing the test stay green. | The generator now also sends exactly the whole balance, or one cent more. |
 | The invariant helper summed balances past 2^53. | The strict int8 parser threw instead of rounding. | Compare totals as BigInt. |
 | A dropped database connection mid-transfer would have crashed the CLI with an uncaught `ECONNRESET`. No data was harmed. | The atomicity test that kills the connection between the debit and the credit. | Handle client errors in `withTransaction`, and discard the broken connection. |
-| `move-money open -5` said "Unknown option", and unknown flags dumped the whole help text. | An end-to-end run of the installed command. | Clear one-line errors. |
+| `move-money open -5` said "Unknown option", unknown flags dumped the whole help text, and `transfer … 0` said "at least 1" (meaning one cent). | An end-to-end run of the installed command. | Clear one-line errors, with amounts in dollars and cents. |
+| With Postgres already on port 5432, the Docker instructions' URL reached the *other* server, not the container. | Actually running the Docker setup. | The container uses port 5433, plus a health check behind `up --wait`. |
 
 I also checked that the tests can fail. With the lock deleted from the real code, the race test fails. Two deliberately broken transfers in the test file are asserted to break.
 
