@@ -13,11 +13,13 @@ You need **Node 22+** and a **Postgres** instance. Pick one of these:
 brew install postgresql@17 && brew services start postgresql@17
 createdb move_money && createdb move_money_test
 
-# Option B: Docker (creates both databases)
-docker compose up -d
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/move_money
-export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/move_money_test
+# Option B: Docker (creates both databases, on port 5433)
+docker compose up -d --wait
+export DATABASE_URL=postgres://postgres:postgres@localhost:5433/move_money
+export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5433/move_money_test
 ```
+
+The Docker database uses port 5433, so it can run alongside a Postgres you already have on 5432. `--wait` returns once the database is ready. `docker compose down -v` removes it.
 
 Then:
 

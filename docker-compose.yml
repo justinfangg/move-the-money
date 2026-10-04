@@ -1,7 +1,12 @@
-# Optional: a throwaway Postgres for running the app and tests.
-#   docker compose up -d
-#   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/move_money
-#   export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/move_money_test
+# Optional: a throwaway Postgres for running the CLI and the tests.
+#
+#   docker compose up -d --wait
+#   export DATABASE_URL=postgres://postgres:postgres@localhost:5433/move_money
+#   export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5433/move_money_test
+#
+# Published on 5433, not 5432, so it can't collide with a Postgres already
+# running on the machine. On 5432, the URLs above would quietly reach the
+# *other* server instead of this one.
 services:
   postgres:
     image: postgres:17
@@ -10,6 +15,14 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: move_money
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - ./db/docker-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # Over TCP and against the test database: during first-time setup the
+      # image runs a temporary socket-only server, so a plain pg_isready can
+      # report healthy before init.sql has created move_money_test.
+      test: ["CMD-SHELL", "psql -h 127.0.0.1 -U postgres -d move_money_test -c 'select 1'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
