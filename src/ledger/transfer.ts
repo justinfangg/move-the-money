@@ -90,11 +90,19 @@ export async function transfer(
       const row = claimed.rows[0];
       if (!row) return replay(client, input);
 
+      // FOR NO KEY UPDATE, not FOR UPDATE. The INSERT above already took
+      // FOR KEY SHARE on both accounts (that's how Postgres enforces the
+      // foreign keys). FOR UPDATE conflicts with KEY SHARE, so two transfers
+      // touching the same account would each hold KEY SHARE and wait for the
+      // other to release it: a deadlock. That happened in the load tests.
+      // FOR NO KEY UPDATE is compatible with KEY SHARE but still conflicts
+      // with itself, so transfers on the same account still serialize here.
+      // It's also the lock the UPDATE below would take anyway.
       const locked = await client.query<{ id: string; balance_cents: number }>(
         `SELECT id, balance_cents FROM accounts
           WHERE id = ANY($1::uuid[])
           ORDER BY id
-          FOR UPDATE`,
+          FOR NO KEY UPDATE`,
         [[fromAccountId, toAccountId]],
       );
       const from = locked.rows.find((r) => r.id === fromAccountId);
