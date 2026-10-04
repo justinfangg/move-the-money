@@ -68,7 +68,7 @@ when                      kind      amount  balance  counterparty
 - **Amounts** are dollars with at most two decimal places (`25`, `25.5`, `25.50`). Anything that can't be represented exactly in cents is refused, never rounded: `25.555`, `1e3`, `-5`, `$5`, `1,000`.
 - **`--key`** is required for `transfer`. Use a fresh key for each transfer you intend, and reuse it if you retry. Running the same command twice, whether from a double Enter, shell history or a retry loop in a script, then moves the money only once. Reusing a key with a different amount or different accounts is refused.
 - **`--json`** gives machine-readable output on stdout. Errors go to stderr as `{"error": code, "message"}`.
-- **Exit codes:** `0` success · `1` refused (insufficient funds, not found, key conflict, balance limit) · `2` bad usage · `3` unexpected error.
+- **Exit codes:** `0` success · `1` refused (insufficient funds, not found, key conflict, balance limit) · `2` bad usage (including negative or sub-cent amounts) · `3` unexpected error.
 
 ## Running the tests
 
@@ -115,7 +115,7 @@ Around that test:
 
 ## Design decisions and tradeoffs
 
-- **A CLI, not an HTTP API.** The brief allowed either. The project began as an HTTP API, and the commit history shows the switch. Every rule lives in the ledger module and the database, so the interface is a thin layer either way. A CLI has less surface to explain, and its "double-click" is re-running a command, which `--key` covers. What a CLI gives up: there's no long-lived server, so every invocation opens its own small connection pool. That's fine for people and scripts, but wrong for high request volumes.
+- **A CLI over a ledger module.** Every rule lives in `src/ledger/` and the database schema. The CLI only parses arguments, calls the ledger and prints the result, so it has almost nothing that could break a rule. On a CLI, the "double-click" is re-running a command, which `--key` covers. The cost: there's no long-lived process, so every invocation opens its own small connection pool. That's fine for people and scripts, but wrong for high volumes.
 - **Postgres** rather than SQLite or in-memory, because the rules are fundamentally about concurrent transactions. Postgres has row-level locks, `CHECK` constraints and unique indexes, so the database holds the line even when application code is wrong. Several CLI processes at once need a real database server anyway. SQLite would serialize all writes, which makes rule 1 trivially true and the test meaningless.
 - **Pessimistic row locks at READ COMMITTED, rather than SERIALIZABLE.** A transfer touches exactly two known rows, so locking them is simple, predictable, and needs no retry loop. SERIALIZABLE would also be correct, but every caller would need retry-on-`40001` logic. The cost is that a very hot account serializes its transfers.
 - **`FOR NO KEY UPDATE`, not `FOR UPDATE`.** The `INSERT INTO transfers` FK check takes `KEY SHARE` locks on both accounts. `FOR UPDATE` conflicts with those, so concurrent transfers deadlocked. `NO KEY UPDATE` doesn't conflict with them, but it still conflicts with itself. The full story is in the build log.
@@ -127,9 +127,24 @@ Around that test:
 - **A rejected attempt doesn't consume its key.** The rejection rolls back the key along with everything else. If you retry after the account is funded, the transfer goes through. That suits "retry until it works", but it does mean a retry can succeed where the first attempt failed. The alternative is to store failed outcomes and replay them. It's tested either way, and it's the decision I'd most want to discuss.
 - **Keys are global, not per-account.** That's simpler. A collision is treated as a conflict, not a second transfer.
 
+## What went wrong, and how it was caught
+
+The full story, with how to reproduce each failure, is in [BUILD_LOG.md](BUILD_LOG.md). In short:
+
+| What went wrong | How it was caught | Fix |
+|---|---|---|
+| Locking accounts with `FOR UPDATE` deadlocked under load. The FK check on the transfer insert had already taken `KEY SHARE` locks, and `FOR UPDATE` conflicts with them. | The load tests hung. Postgres logged 116 deadlocks in 90 seconds. | `FOR NO KEY UPDATE`: 0 deadlocks, 20/20 green runs. |
+| The race test failed against *correct* code. It checked Y's progress after both transfers had finished. | Reading what the failing test actually measured. | Snapshot the flag at the moment X is released. |
+| The property test passed with an off-by-one (`balance <= amount`). | Deliberately introducing that bug and seeing the test stay green. | The generator now also sends exactly the whole balance, or one cent more. |
+| The invariant helper summed balances past 2^53. | The strict int8 parser threw instead of rounding. | Compare totals as BigInt. |
+| A dropped database connection mid-transfer would have crashed the CLI with an uncaught `ECONNRESET`. No data was harmed. | The atomicity test that kills the connection between the debit and the credit. | Handle client errors in `withTransaction`, and discard the broken connection. |
+| `move-money open -5` said "Unknown option", and unknown flags dumped the whole help text. | An end-to-end run of the installed command. | Clear one-line errors. |
+
+I also checked that the tests can fail. With the lock deleted from the real code, the race test fails. Two deliberately broken transfers in the test file are asserted to break.
+
 ## What I chose not to build
 
-- An HTTP API, authentication, users, ownership of accounts.
+- Authentication, users, ownership of accounts.
 - Multiple currencies or FX. Everything is CAD.
 - Deposits and withdrawals from outside the system. Money only enters through opening balances.
 - Recording failed transfer attempts, and expiring idempotency keys (they currently live forever).
@@ -143,7 +158,7 @@ Around that test:
 3. **An outbox table**, written in the same transaction, so other systems learn about transfers exactly once.
 4. **A reconciliation command** (`move-money verify`) that runs the `assertInvariants` checks against real data and exits non-zero on any drift.
 5. **Timeouts:** `lock_timeout` and `statement_timeout`, so a stuck process can't hold a lock indefinitely.
-6. **A service interface** in front of the same ledger module if this needed to serve many clients. The HTTP version in the history is a starting point.
+6. **A long-running service** in front of the same ledger module, if this needed to serve many clients at once instead of one command at a time.
 
 ## Layout
 
