@@ -1,9 +1,7 @@
-import type { AddressInfo } from "node:net";
 import type pg from "pg";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildApp } from "../src/app.js";
 import { withTransaction } from "../src/db/pool.js";
-import { InsufficientFundsError } from "../src/errors.js";
+import { AppError, InsufficientFundsError } from "../src/errors.js";
 import { getAccount, openAccount } from "../src/ledger/accounts.js";
 import { transfer } from "../src/ledger/transfer.js";
 import { assertInvariants, makeTestPool, resetDb } from "./helpers.js";
@@ -260,38 +258,36 @@ describe("rule 1: two transfers competing for the same money", () => {
   });
 });
 
-describe("rule 1 under load, over HTTP", () => {
-  const app = buildApp({ pool });
-  let baseUrl: string;
+describe("rule 1 under load", () => {
+  // Bursts of real concurrent transactions: the pool has 20 connections, so
+  // up to 20 transfers are genuinely in flight in Postgres at once.
+  // test/cli-process.test.ts does the same with separate OS processes.
 
-  beforeEach(async () => {
-    if (!baseUrl) {
-      await app.listen({ port: 0, host: "127.0.0.1" });
-      baseUrl = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
-    }
-  });
-  afterAll(() => app.close());
+  const send = (from: string, to: string, amountCents: number, key: string) =>
+    transfer(pool, { fromAccountId: from, toAccountId: to, amountCents, idempotencyKey: key });
 
-  function post(from: string, to: string, amountCents: number, key: string) {
-    return fetch(`${baseUrl}/transfers`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": key },
-      body: JSON.stringify({ from_account_id: from, to_account_id: to, amount_cents: amountCents }),
-    });
+  /** Settle all, and fail on anything other than success or a business refusal. */
+  async function outcomes(attempts: Promise<unknown>[]): Promise<{ ok: number; refused: number }> {
+    const results = await Promise.allSettled(attempts);
+    const unexpected = results.filter((r) => r.status === "rejected" && !(r.reason instanceof AppError));
+    expect(unexpected.map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+    return {
+      ok: results.filter((r) => r.status === "fulfilled").length,
+      refused: results.filter((r) => r.status === "rejected").length,
+    };
   }
 
-  it("100 simultaneous requests draining one account: exactly as many succeed as the balance allows", async () => {
+  it("100 simultaneous transfers draining one account: exactly as many succeed as the balance allows", async () => {
     const source = await newAccount(1_000);
     const sinks = await Promise.all(Array.from({ length: 5 }, () => newAccount(0)));
 
-    const responses = await Promise.all(
-      Array.from({ length: 100 }, (_, i) => post(source, sinks[i % sinks.length]!, 30, `drain-${i}`)),
+    const { ok, refused } = await outcomes(
+      Array.from({ length: 100 }, (_, i) => send(source, sinks[i % sinks.length]!, 30, `drain-${i}`)),
     );
-    const statuses = responses.map((r) => r.status);
 
     // floor(1000 / 30) = 33 transfers fit; 1000 - 33*30 = 10 is left over.
-    expect(statuses.filter((s) => s === 201)).toHaveLength(33);
-    expect(statuses.filter((s) => s === 422)).toHaveLength(67);
+    expect(ok).toBe(33);
+    expect(refused).toBe(67);
     expect(await balanceOf(source)).toBe(10);
     const sinkTotal = (await Promise.all(sinks.map(balanceOf))).reduce((x, y) => x + y, 0);
     expect(sinkTotal).toBe(990);
@@ -300,28 +296,23 @@ describe("rule 1 under load, over HTTP", () => {
   it("transfers in opposite directions at once neither deadlock nor lose money", async () => {
     const a = await newAccount(1_000);
     const b = await newAccount(1_000);
-
-    const responses = await Promise.all(
+    await outcomes(
       Array.from({ length: 100 }, (_, i) =>
-        i % 2 === 0 ? post(a, b, 1 + (i % 37), `ab-${i}`) : post(b, a, 1 + (i % 41), `ba-${i}`),
+        i % 2 === 0 ? send(a, b, 1 + (i % 37), `ab-${i}`) : send(b, a, 1 + (i % 41), `ba-${i}`),
       ),
     );
-    const unexpected = responses.filter((r) => r.status !== 201 && r.status !== 422);
-    expect(unexpected.map((r) => r.status)).toEqual([]);
     expect((await balanceOf(a)) + (await balanceOf(b))).toBe(2_000);
   });
 
   it("many accounts sending to each other at once: no deadlocks, money conserved", async () => {
     const accounts = await Promise.all(Array.from({ length: 6 }, () => newAccount(500)));
-    const responses = await Promise.all(
+    await outcomes(
       Array.from({ length: 150 }, (_, i) => {
         const from = accounts[i % 6]!;
         const to = accounts[(i * 7 + 1) % 6]!;
-        return from === to ? null : post(from, to, 1 + ((i * 13) % 90), `mesh-${i}`);
-      }).filter((p): p is Promise<Response> => p !== null),
+        return from === to ? null : send(from, to, 1 + ((i * 13) % 90), `mesh-${i}`);
+      }).filter((p) => p !== null),
     );
-    const unexpected = responses.filter((r) => r.status !== 201 && r.status !== 422);
-    expect(unexpected.map((r) => r.status)).toEqual([]);
     const total = (await Promise.all(accounts.map(balanceOf))).reduce((x, y) => x + y, 0);
     expect(total).toBe(3_000);
   });

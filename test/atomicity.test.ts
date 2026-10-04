@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildApp } from "../src/app.js";
-import { NotFoundError } from "../src/errors.js";
+import { InsufficientFundsError, NotFoundError, ValidationError } from "../src/errors.js";
 import { getAccount, listTransactions, openAccount } from "../src/ledger/accounts.js";
 import { transfer } from "../src/ledger/transfer.js";
 import { assertInvariants, makeTestPool, resetDb } from "./helpers.js";
@@ -13,12 +12,10 @@ import { assertInvariants, makeTestPool, resetDb } from "./helpers.js";
 
 const pool = makeTestPool(5);
 const observer = makeTestPool(2); // a separate connection, like another client
-const app = buildApp({ pool });
 
 beforeEach(() => resetDb(pool));
 afterEach(() => assertInvariants(pool));
 afterAll(async () => {
-  await app.close();
   await pool.end();
   await observer.end();
 });
@@ -124,46 +121,30 @@ describe("rule 2: all or nothing", () => {
   it("insufficient funds changes nothing", async () => {
     const a = await newAccount(100);
     const b = await newAccount(50);
-    const res = await postTransfer(a, b, 101, "k");
-    expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("insufficient_funds");
+    await expect(send(a, b, 101, "k")).rejects.toBeInstanceOf(InsufficientFundsError);
     await expectUntouched(a, b);
   });
 
-  it("an unknown destination account changes nothing", async () => {
+  it("an unknown account on either side changes nothing", async () => {
     const a = await newAccount(100);
     const b = await newAccount(50);
     const ghost = "00000000-0000-4000-8000-000000000000";
-    await expect(
-      transfer(pool, { fromAccountId: a, toAccountId: ghost, amountCents: 10, idempotencyKey: "k" }),
-    ).rejects.toBeInstanceOf(NotFoundError);
-    const res = await postTransfer(ghost, a, 10, "k2");
-    expect(res.statusCode).toBe(404);
+    await expect(send(a, ghost, 10, "k")).rejects.toBeInstanceOf(NotFoundError);
+    await expect(send(ghost, a, 10, "k2")).rejects.toBeInstanceOf(NotFoundError);
     await expectUntouched(a, b);
   });
 
   it("rejects transfers to the same account, and invalid amounts, before touching anything", async () => {
     const a = await newAccount(100);
     const b = await newAccount(50);
-    expect((await postTransfer(a, a, 10, "k1")).statusCode).toBe(400);
-    for (const bad of ["0", "-10", "10.5", "1e1", '"10"', "null"]) {
-      const res = await app.inject({
-        method: "POST",
-        url: "/transfers",
-        headers: { "content-type": "application/json", "idempotency-key": `bad-${bad}` },
-        payload: `{"from_account_id":"${a}","to_account_id":"${b}","amount_cents":${bad}}`,
-      });
-      expect(res.statusCode, `amount ${bad}`).toBe(400);
+    await expect(send(a, a, 10, "k1")).rejects.toBeInstanceOf(ValidationError);
+    for (const bad of [0, -10, 10.5, Number.NaN, 2 ** 53]) {
+      await expect(send(a, b, bad, `bad-${bad}`), `amount ${bad}`).rejects.toBeInstanceOf(ValidationError);
     }
     await expectUntouched(a, b);
   });
 });
 
-function postTransfer(from: string, to: string, amountCents: number, key: string) {
-  return app.inject({
-    method: "POST",
-    url: "/transfers",
-    headers: { "content-type": "application/json", "idempotency-key": key },
-    payload: { from_account_id: from, to_account_id: to, amount_cents: amountCents },
-  });
+function send(from: string, to: string, amountCents: number, key: string) {
+  return transfer(pool, { fromAccountId: from, toAccountId: to, amountCents, idempotencyKey: key });
 }
