@@ -50,7 +50,7 @@ function toTransfer(row: TransferRow): Transfer {
 
 export class BalanceLimitError extends AppError {
   constructor() {
-    super(422, "balance_limit_exceeded", "transfer would exceed the maximum account balance");
+    super("balance_limit_exceeded", "transfer would exceed the maximum account balance");
   }
 }
 

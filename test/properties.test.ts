@@ -167,7 +167,7 @@ describe("the edges of the representable range", () => {
     const b = (await openAccount(pool, { initialBalanceCents: MAX - 5 })).value.id;
     await expect(
       transfer(pool, { fromAccountId: a, toAccountId: b, amountCents: 10, idempotencyKey: "overflow" }),
-    ).rejects.toMatchObject({ code: "balance_limit_exceeded", statusCode: 422 });
+    ).rejects.toMatchObject({ code: "balance_limit_exceeded" });
     expect((await getAccount(pool, a)).balance_cents).toBe(10);
     expect((await getAccount(pool, b)).balance_cents).toBe(MAX - 5);
   });

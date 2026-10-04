@@ -1,37 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ValidationError } from "../src/errors.js";
-import { formatCents, parseAmount, parseJsonStrict, requireCents } from "../src/money.js";
-
-describe("parseJsonStrict", () => {
-  it("accepts plain integer literals", () => {
-    expect(parseJsonStrict('{"amount_cents": 12345}')).toEqual({ amount_cents: 12345 });
-    expect(parseJsonStrict('{"amount_cents": 0}')).toEqual({ amount_cents: 0 });
-    expect(parseJsonStrict(`{"amount_cents": ${Number.MAX_SAFE_INTEGER}}`)).toEqual({
-      amount_cents: Number.MAX_SAFE_INTEGER,
-    });
-  });
-
-  it.each([
-    ["a fraction", "10.5"],
-    ["a trailing .0", "10.0"],
-    // The dangerous one: JSON.parse turns this into exactly 100, so no check
-    // on the parsed value could ever tell it apart from a legitimate 100.
-    ["a fraction below double precision", "100.000000000000001"],
-    ["an exponent", "1e2"],
-    ["a negative exponent", "10000e-2"],
-  ])("rejects %s (%s)", (_label, literal) => {
-    expect(() => parseJsonStrict(`{"amount_cents": ${literal}}`)).toThrow(ValidationError);
-  });
-
-  it("rejects integers that would be rounded by the double conversion", () => {
-    // 2^53 + 1 parses to 2^53: a cent silently disappears.
-    expect(() => parseJsonStrict('{"amount_cents": 9007199254740993}')).toThrow(ValidationError);
-  });
-
-  it("checks nested numbers too", () => {
-    expect(() => parseJsonStrict('{"a": [1, {"b": 2.5}]}')).toThrow(ValidationError);
-  });
-});
+import { formatCents, parseAmount, requireCents } from "../src/money.js";
 
 describe("requireCents", () => {
   it("returns valid amounts unchanged", () => {

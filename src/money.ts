@@ -6,40 +6,9 @@ import { ValidationError } from "./errors.js";
  * are exact in JS, Postgres BIGINT is exact, and the only arithmetic we do is
  * add/subtract/compare, which stays exact as long as we stay in range.
  *
- * The danger is at the edges, where values come in:
- *   - JSON numbers are IEEE-754 doubles. JSON.parse("100.000000000000001")
- *     is exactly 100, and JSON.parse("9007199254740993") is ...992. By the
- *     time you have a JS number, the fraction or the last digit is already
- *     gone, so validation *after* parsing can't see it.
- *   - So request bodies are parsed with parseJsonStrict, which looks at each
- *     number's source text and rejects anything that isn't a plain integer
- *     literal.
+ * The danger is at the edges, where values come in and go out as text.
+ * parseAmount and formatCents convert without ever going through a float.
  */
-
-const INTEGER_LITERAL = /^-?(0|[1-9][0-9]*)$/;
-
-type ReviverContext = { source?: string } | undefined;
-
-/**
- * JSON.parse, except that every number in the document must be written as a
- * plain integer literal (no fraction, no exponent), and must fit exactly in a
- * JS number. Relies on JSON.parse source text access (Node 22+).
- */
-export function parseJsonStrict(text: string): unknown {
-  return JSON.parse(text, function (this: unknown, key: string, value: unknown, ctx?: ReviverContext) {
-    if (typeof value === "number") {
-      const source = ctx?.source;
-      const where = key === "" ? "body" : `"${key}"`;
-      if (source !== undefined && !INTEGER_LITERAL.test(source)) {
-        throw new ValidationError(`${where} must be an integer number of cents, got ${source}`);
-      }
-      if (!Number.isSafeInteger(value)) {
-        throw new ValidationError(`${where} is too large to represent exactly, got ${source ?? value}`);
-      }
-    }
-    return value;
-  } as (this: unknown, key: string, value: unknown) => unknown);
-}
 
 /**
  * Validate an amount in cents that has already been parsed. Accepts only safe

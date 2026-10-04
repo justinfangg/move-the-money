@@ -9,15 +9,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "cli": "tsx src/cli.ts",
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
     "db:migrate": "tsx src/db/migrate.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "fastify": "^5.12.5",
     "pg": "^8.23.1"
   },
   "devDependencies": {
