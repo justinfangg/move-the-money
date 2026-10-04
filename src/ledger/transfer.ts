@@ -7,6 +7,8 @@ import {
   NotFoundError,
   ValidationError,
 } from "../errors.js";
+import { requireCents } from "../money.js";
+import { requireIdempotencyKey, requireUuid } from "../validate.js";
 import { type Created, CURRENCY, type Transfer } from "./types.js";
 
 export interface TransferInput {
@@ -73,6 +75,12 @@ export async function transfer(
   input: TransferInput,
   hooks: TransferHooks = {},
 ): Promise<Created<Transfer>> {
+  input = {
+    fromAccountId: requireUuid(input.fromAccountId, "from account id"),
+    toAccountId: requireUuid(input.toAccountId, "to account id"),
+    amountCents: requireCents(input.amountCents, "amount", 1),
+    idempotencyKey: requireIdempotencyKey(input.idempotencyKey),
+  };
   const { fromAccountId, toAccountId, amountCents, idempotencyKey } = input;
   if (fromAccountId === toAccountId) {
     throw new ValidationError("cannot transfer to the same account");
@@ -160,6 +168,7 @@ async function replay(client: pg.PoolClient, input: TransferInput): Promise<Crea
 }
 
 export async function getTransfer(pool: pg.Pool, id: string): Promise<Transfer> {
+  id = requireUuid(id, "transfer id");
   const { rows } = await pool.query<TransferRow>(
     "SELECT id, from_account_id, to_account_id, amount_cents, created_at FROM transfers WHERE id = $1",
     [id],

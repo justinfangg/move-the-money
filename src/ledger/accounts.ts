@@ -1,6 +1,8 @@
 import type pg from "pg";
 import { withTransaction } from "../db/pool.js";
 import { IdempotencyConflictError, NotFoundError } from "../errors.js";
+import { requireCents } from "../money.js";
+import { requireIdempotencyKey, requireUuid } from "../validate.js";
 import { type Account, type Created, CURRENCY, type LedgerEntry } from "./types.js";
 
 type Queryable = pg.Pool | pg.PoolClient;
@@ -32,13 +34,18 @@ export async function openAccount(
   pool: pg.Pool,
   input: { initialBalanceCents: number; idempotencyKey?: string },
 ): Promise<Created<Account>> {
+  // Validate here, not only at the edge: this module is the boundary every
+  // caller (CLI, tests, anything later) goes through.
+  const initialBalanceCents = requireCents(input.initialBalanceCents, "initial balance", 0);
+  const idempotencyKey =
+    input.idempotencyKey === undefined ? null : requireIdempotencyKey(input.idempotencyKey);
   return withTransaction(pool, async (client) => {
     const inserted = await client.query<AccountRow>(
       `INSERT INTO accounts (balance_cents, idempotency_key)
        VALUES ($1, $2)
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING id, balance_cents, created_at`,
-      [input.initialBalanceCents, input.idempotencyKey ?? null],
+      [initialBalanceCents, idempotencyKey],
     );
 
     const row = inserted.rows[0];
@@ -46,7 +53,7 @@ export async function openAccount(
       await client.query(
         `INSERT INTO ledger_entries (account_id, kind, amount_cents, balance_after_cents)
          VALUES ($1, 'opening', $2, $2)`,
-        [row.id, input.initialBalanceCents],
+        [row.id, initialBalanceCents],
       );
       return { value: toAccount(row), replayed: false };
     }
@@ -58,10 +65,10 @@ export async function openAccount(
          FROM accounts a
          JOIN ledger_entries l ON l.account_id = a.id AND l.kind = 'opening'
         WHERE a.idempotency_key = $1`,
-      [input.idempotencyKey],
+      [idempotencyKey],
     );
     const prior = existing.rows[0]!;
-    if (prior.opening_cents !== input.initialBalanceCents) {
+    if (prior.opening_cents !== initialBalanceCents) {
       throw new IdempotencyConflictError();
     }
     return { value: toAccount(prior), replayed: true };
@@ -69,6 +76,7 @@ export async function openAccount(
 }
 
 export async function getAccount(db: Queryable, id: string): Promise<Account> {
+  id = requireUuid(id, "account id");
   const { rows } = await db.query<AccountRow>(
     "SELECT id, balance_cents, created_at FROM accounts WHERE id = $1",
     [id],
