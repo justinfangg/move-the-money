@@ -3,6 +3,7 @@ import type pg from "pg";
 import { AppError, ValidationError } from "./errors.js";
 import { parseJsonStrict } from "./money.js";
 import { accountRoutes } from "./routes/accounts.js";
+import { transferRoutes } from "./routes/transfers.js";
 
 export interface AppOptions {
   pool: pg.Pool;
@@ -47,5 +48,6 @@ export function buildApp({ pool, logger = false }: AppOptions): FastifyInstance 
   });
 
   accountRoutes(app, pool);
+  transferRoutes(app, pool);
   return app;
 }
