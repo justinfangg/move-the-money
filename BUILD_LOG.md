@@ -40,6 +40,8 @@ The first fast-check property test still passed when I changed the funds check t
 
 ### 5. Framework defaults that quietly change money input
 
+These were found while the project was still an HTTP API. The API has since been replaced by a CLI (see 8), but the code and tests for these fixes are in the history.
+
 - **`JSON.parse` rounds before you can validate.** `JSON.parse("100.000000000000001")` is exactly `100`, and `9007199254740993` becomes `…992`. No check on the parsed value can see that. The fix uses the reviver's `context.source` (Node 22+) to reject any number literal that isn't a plain integer.
 - **Fastify's Ajv uses `coerceTypes`.** Declaring `amount_cents: {type: "integer"}` would quietly accept `"100"`. Amount fields are left untyped in the schema and validated by `requireCents`.
 - **Fastify's Ajv uses `removeAdditional`.** `{"initial_balance_cents": 1, "bonus": 1}` was accepted, with `bonus` silently dropped. A test caught it. That option is now off.
@@ -53,8 +55,22 @@ The property tests generate balances near 2^53. Each balance fits, but `SUM(bala
 
 The atomicity test kills the transfer's own Postgres backend between the debit and the credit. The data was fine: nothing committed. But `pg` emits an `'error'` event on a client whose connection drops. With no listener, Node treats that as an uncaught exception and the process exits. `withTransaction` now listens while it holds a client and discards the client if `ROLLBACK` fails. The pool also has an idle-error handler.
 
+### 8. Switching from an HTTP API to a CLI (`ab8ffb1` → `f9263ed`)
+
+After the API was finished, I decided a CLI was a better fit for the brief. I did the switch in steps so the tests stayed green throughout:
+1. Move all input validation into the ledger functions. Until then, only the HTTP schemas checked amounts, ids and keys. Removing the HTTP layer without this step would have left the ledger accepting anything.
+2. Add the CLI alongside the API.
+3. Port the HTTP-based tests to call the ledger directly, and add tests that race real CLI processes.
+4. Delete the API.
+
+Things that came up along the way:
+- **Parsing typed dollars.** The obvious `Math.round(Number(text) * 100)` is wrong, because `Number("0.29") * 100` is `28.999999999999996`. Rounding hides that particular case but not the general problem. `parseAmount` splits the string and uses BigInt, and refuses more than two decimal places instead of rounding them.
+- **`--key` is required for `transfer`.** An auto-generated key would be different on every run, so pressing Enter twice would move the money twice. That's exactly the failure rule 3 describes.
+- **Process tests vs. the deterministic test.** Spawning 12 CLI processes at once shows the guarantees hold across processes. It can't prove they overlapped in the database, because process start-up jitter is in the tens of milliseconds. The `pg_blocking_pids` test is still the proof. The process test is supporting evidence.
+
 ## Decisions I'd want to talk about
 
+- **CLI vs HTTP API.** The ledger doesn't care which one sits in front of it, and the history has both.
 - **Pessimistic locks vs SERIALIZABLE**, and what happens to a hot account. See the README.
 - **Whether a failed attempt should burn its idempotency key.** Currently it doesn't. A retry after funding succeeds.
 - **A balance column plus a ledger, vs a ledger only.** The tests treat their agreement as an invariant.
