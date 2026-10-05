@@ -54,6 +54,29 @@ describe("schema backstops", () => {
     await expect(insert()).rejects.toMatchObject({ code: "23505" });
   });
 
+  it("only accepts a reversal that mirrors its original, and only one per transfer", async () => {
+    const a = await insertAccount(100);
+    const b = await insertAccount(100);
+    const c = await insertAccount(100);
+    const insert = (key: string, from: string, to: string, amount: number, reverses: string | null) =>
+      pool.query<{ id: string }>(
+        `INSERT INTO transfers (idempotency_key, from_account_id, to_account_id, amount_cents, reverses_transfer_id)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [key, from, to, amount, reverses],
+      );
+    const original = (await insert("orig", a, b, 10, null)).rows[0]!.id;
+
+    await expect(insert("r1", b, a, 9, original)).rejects.toMatchObject({ constraint: "reversal_mirrors_original" });
+    await expect(insert("r2", a, b, 10, original)).rejects.toMatchObject({ constraint: "reversal_mirrors_original" });
+    await expect(insert("r3", c, a, 10, original)).rejects.toMatchObject({ constraint: "reversal_mirrors_original" });
+
+    await insert("r4", b, a, 10, original);
+    await expect(insert("r5", b, a, 10, original)).rejects.toMatchObject({
+      code: "23505",
+      constraint: "one_reversal_per_transfer",
+    });
+  });
+
   it("returns BIGINT as an exact JS number, and refuses ones it can't represent", async () => {
     const ok = await pool.query("SELECT 9007199254740991::bigint AS n");
     expect(ok.rows[0].n).toBe(Number.MAX_SAFE_INTEGER);

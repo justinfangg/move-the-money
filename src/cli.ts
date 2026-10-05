@@ -7,7 +7,7 @@ import { migrate } from "./db/migrate.js";
 import { createPool } from "./db/pool.js";
 import { AppError, ValidationError } from "./errors.js";
 import { getAccount, listTransactions, openAccount } from "./ledger/accounts.js";
-import { transfer } from "./ledger/transfer.js";
+import { reverseTransfer, transfer } from "./ledger/transfer.js";
 import { CURRENCY } from "./ledger/types.js";
 import { formatCents, parseAmount } from "./money.js";
 
@@ -17,16 +17,21 @@ Usage:
   move-money open <amount> [--key <key>]
   move-money balance <account-id>
   move-money transfer <from-account-id> <to-account-id> <amount> --key <key>
+  move-money reverse <transfer-id> --key <key>
   move-money history <account-id> [--limit <n>]
   move-money migrate
 
 Amounts are dollars with at most two decimal places, e.g. 25 or 25.50.
 Anything finer than a cent is refused, not rounded.
 
+reverse returns the full amount of a transfer to its sender, recorded as a
+reversal of that transfer. A transfer can be reversed once. It is refused if
+the recipient no longer has the money.
+
 Options:
   --key <key>    Idempotency key. Running a command again with the same key
-                 applies it only once. Required for transfer: use a fresh key
-                 for each transfer you intend, e.g. --key "$(uuidgen)", and
+                 applies it only once. Required for transfer and reverse: use
+                 a fresh key for each one you intend, e.g. --key "$(uuidgen)", and
                  reuse it if you retry.
   --limit <n>    Number of history entries to show (default 20, max 500).
   --json         Print machine-readable JSON.
@@ -38,7 +43,8 @@ Environment:
 
 Exit codes:
   0 success
-  1 refused (insufficient funds, not found, key conflict, balance limit)
+  1 refused (insufficient funds, not found, key conflict, balance limit,
+    already reversed)
   2 bad usage
   3 unexpected error
 `;
@@ -124,6 +130,23 @@ export async function run(argv: string[], pool: pg.Pool, io: Io): Promise<number
         return EXIT.ok;
       }
 
+      case "reverse": {
+        const [id] = expectArgs(rest, ["transfer-id"]);
+        if (values.key === undefined) {
+          throw new ValidationError(
+            'reverse needs --key, so that running it twice can\'t return the money twice. Use a fresh key, e.g. --key "$(uuidgen)", and reuse it to retry.',
+          );
+        }
+        const { value, replayed } = await reverseTransfer(pool, { transferId: id, idempotencyKey: values.key });
+        print(
+          { transfer: value, replayed },
+          replayed
+            ? `Already applied: transfer ${value.reverses_transfer_id} was reversed by ${value.id}. No money moved this time.`
+            : `Reversed transfer ${value.reverses_transfer_id}: returned ${money(value.amount_cents)} from ${value.from_account_id} to ${value.to_account_id} (reversal ${value.id}).`,
+        );
+        return EXIT.ok;
+      }
+
       case "history": {
         const [id] = expectArgs(rest, ["account-id"]);
         const limit = parseLimit(values.limit);
@@ -186,10 +209,11 @@ function formatHistory(entries: Awaited<ReturnType<typeof listTransactions>>): s
   if (entries.length === 0) return "No transactions.";
   const rows = entries.map((e) => [
     e.created_at,
-    e.kind,
+    e.reverses_transfer_id ? "reversal" : e.kind,
     (e.amount_cents > 0 ? "+" : "") + formatCents(e.amount_cents),
     formatCents(e.balance_after_cents),
-    e.kind === "debit" ? `to ${e.counterparty_account_id}` : e.kind === "credit" ? `from ${e.counterparty_account_id}` : "",
+    (e.kind === "debit" ? `to ${e.counterparty_account_id}` : e.kind === "credit" ? `from ${e.counterparty_account_id}` : "") +
+      (e.reverses_transfer_id ? ` (reverses ${e.reverses_transfer_id})` : ""),
   ]);
   const header = ["when", "kind", "amount", "balance", "counterparty"];
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));

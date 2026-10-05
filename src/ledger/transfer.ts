@@ -9,7 +9,7 @@ import {
 } from "../errors.js";
 import { requireCents } from "../money.js";
 import { requireIdempotencyKey, requireUuid } from "../validate.js";
-import { type Created, CURRENCY, type Transfer } from "./types.js";
+import { type Created, CURRENCY, type Transfer, type TransferDetail } from "./types.js";
 
 export interface TransferInput {
   fromAccountId: string;
@@ -29,13 +29,21 @@ export interface TransferHooks {
   afterDebit?: (client: pg.PoolClient) => Promise<void>;
 }
 
+export interface ReverseInput {
+  transferId: string;
+  idempotencyKey: string;
+}
+
 interface TransferRow {
   id: string;
   from_account_id: string;
   to_account_id: string;
   amount_cents: number;
+  reverses_transfer_id: string | null;
   created_at: Date;
 }
+
+const TRANSFER_COLUMNS = "id, from_account_id, to_account_id, amount_cents, reverses_transfer_id, created_at";
 
 function toTransfer(row: TransferRow): Transfer {
   return {
@@ -44,6 +52,7 @@ function toTransfer(row: TransferRow): Transfer {
     to_account_id: row.to_account_id,
     amount_cents: row.amount_cents,
     currency: CURRENCY,
+    reverses_transfer_id: row.reverses_transfer_id,
     created_at: row.created_at.toISOString(),
   };
 }
@@ -51,6 +60,12 @@ function toTransfer(row: TransferRow): Transfer {
 export class BalanceLimitError extends AppError {
   constructor() {
     super("balance_limit_exceeded", "transfer would exceed the maximum account balance");
+  }
+}
+
+export class AlreadyReversedError extends AppError {
+  constructor(message = "transfer has already been reversed") {
+    super("already_reversed", message);
   }
 }
 
@@ -92,43 +107,118 @@ export async function transfer(
         `INSERT INTO transfers (idempotency_key, from_account_id, to_account_id, amount_cents)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (idempotency_key) DO NOTHING
-         RETURNING id, from_account_id, to_account_id, amount_cents, created_at`,
+         RETURNING ${TRANSFER_COLUMNS}`,
         [idempotencyKey, fromAccountId, toAccountId, amountCents],
       );
       const row = claimed.rows[0];
       if (!row) return replay(client, input);
 
-      // FOR NO KEY UPDATE, not FOR UPDATE. The INSERT above already took
-      // FOR KEY SHARE on both accounts (that's how Postgres enforces the
-      // foreign keys). FOR UPDATE conflicts with KEY SHARE, so two transfers
-      // touching the same account would each hold KEY SHARE and wait for the
-      // other to release it: a deadlock. That happened in the load tests.
-      // FOR NO KEY UPDATE is compatible with KEY SHARE but still conflicts
-      // with itself, so transfers on the same account still serialize here.
-      // It's also the lock the UPDATE below would take anyway.
-      const locked = await client.query<{ id: string; balance_cents: number }>(
-        `SELECT id, balance_cents FROM accounts
-          WHERE id = ANY($1::uuid[])
-          ORDER BY id
-          FOR NO KEY UPDATE`,
-        [[fromAccountId, toAccountId]],
-      );
-      const from = locked.rows.find((r) => r.id === fromAccountId);
-      if (!from || locked.rows.length !== 2) throw new NotFoundError("account not found");
-
-      await hooks.afterLock?.(client);
-
-      if (from.balance_cents < amountCents) throw new InsufficientFundsError();
-
-      await move(client, row.id, fromAccountId, -amountCents, "debit");
-      await hooks.afterDebit?.(client);
-      await move(client, row.id, toAccountId, amountCents, "credit");
-
+      await settle(client, row, hooks, () => new InsufficientFundsError());
       return { value: toTransfer(row), replayed: false };
     });
   } catch (err) {
     throw translatePgError(err);
   }
+}
+
+/**
+ * Undo an earlier transfer in full: move the same amount back from its
+ * recipient to its sender, recorded as a new transfer that points at the
+ * original. Same transaction shape and guarantees as `transfer`:
+ *
+ *   - The idempotency key makes retries safe; reusing it for anything other
+ *     than reversing this same transfer is a conflict.
+ *   - A transfer can be reversed at most once. A second attempt with a
+ *     different key, even a concurrent one, is refused (the unique index on
+ *     reverses_transfer_id decides the race).
+ *   - If the recipient no longer has the money, the reversal is refused
+ *     rather than driving their balance negative.
+ */
+export async function reverseTransfer(
+  pool: pg.Pool,
+  input: ReverseInput,
+  hooks: TransferHooks = {},
+): Promise<Created<Transfer>> {
+  const transferId = requireUuid(input.transferId, "transfer id");
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey);
+
+  try {
+    return await withTransaction(pool, async (client) => {
+      // Transfers are never updated, so no lock is needed to read this one.
+      const found = await client.query<TransferRow>(
+        `SELECT ${TRANSFER_COLUMNS} FROM transfers WHERE id = $1`,
+        [transferId],
+      );
+      const original = found.rows[0];
+      if (!original) throw new NotFoundError(`transfer ${transferId} not found`);
+      if (original.reverses_transfer_id !== null) {
+        throw new ValidationError("cannot reverse a reversal");
+      }
+
+      const claimed = await client.query<TransferRow>(
+        `INSERT INTO transfers (idempotency_key, from_account_id, to_account_id, amount_cents, reverses_transfer_id)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (idempotency_key) DO NOTHING
+         RETURNING ${TRANSFER_COLUMNS}`,
+        [idempotencyKey, original.to_account_id, original.from_account_id, original.amount_cents, original.id],
+      );
+      const row = claimed.rows[0];
+      if (!row) {
+        const prior = await findByKey(client, idempotencyKey);
+        if (prior.reverses_transfer_id !== transferId) throw new IdempotencyConflictError();
+        return { value: toTransfer(prior), replayed: true };
+      }
+
+      await settle(
+        client,
+        row,
+        hooks,
+        () => new InsufficientFundsError("insufficient funds: the recipient no longer has the money to return"),
+      );
+      return { value: toTransfer(row), replayed: false };
+    });
+  } catch (err) {
+    throw translatePgError(err);
+  }
+}
+
+/**
+ * Apply a transfer row that this transaction has just claimed: lock both
+ * accounts, check funds, then debit and credit.
+ */
+async function settle(
+  client: pg.PoolClient,
+  row: TransferRow,
+  hooks: TransferHooks,
+  insufficientFunds: () => Error,
+): Promise<void> {
+  const { id, from_account_id: fromAccountId, to_account_id: toAccountId, amount_cents: amountCents } = row;
+
+  // FOR NO KEY UPDATE, not FOR UPDATE. The caller's INSERT into transfers
+  // already took FOR KEY SHARE on both accounts (that's how Postgres enforces the
+  // foreign keys). FOR UPDATE conflicts with KEY SHARE, so two transfers
+  // touching the same account would each hold KEY SHARE and wait for the
+  // other to release it: a deadlock. That happened in the load tests.
+  // FOR NO KEY UPDATE is compatible with KEY SHARE but still conflicts
+  // with itself, so transfers on the same account still serialize here.
+  // It's also the lock the UPDATE below would take anyway.
+  const locked = await client.query<{ id: string; balance_cents: number }>(
+    `SELECT id, balance_cents FROM accounts
+      WHERE id = ANY($1::uuid[])
+      ORDER BY id
+      FOR NO KEY UPDATE`,
+    [[fromAccountId, toAccountId]],
+  );
+  const from = locked.rows.find((r) => r.id === fromAccountId);
+  if (!from || locked.rows.length !== 2) throw new NotFoundError("account not found");
+
+  await hooks.afterLock?.(client);
+
+  if (from.balance_cents < amountCents) throw insufficientFunds();
+
+  await move(client, id, fromAccountId, -amountCents, "debit");
+  await hooks.afterDebit?.(client);
+  await move(client, id, toAccountId, amountCents, "credit");
 }
 
 async function move(
@@ -152,14 +242,20 @@ async function move(
   );
 }
 
-async function replay(client: pg.PoolClient, input: TransferInput): Promise<Created<Transfer>> {
+async function findByKey(client: pg.PoolClient, idempotencyKey: string): Promise<TransferRow> {
   const { rows } = await client.query<TransferRow>(
-    `SELECT id, from_account_id, to_account_id, amount_cents, created_at
-       FROM transfers WHERE idempotency_key = $1`,
-    [input.idempotencyKey],
+    `SELECT ${TRANSFER_COLUMNS} FROM transfers WHERE idempotency_key = $1`,
+    [idempotencyKey],
   );
-  const prior = rows[0]!;
+  return rows[0]!;
+}
+
+async function replay(client: pg.PoolClient, input: TransferInput): Promise<Created<Transfer>> {
+  const prior = await findByKey(client, input.idempotencyKey);
+  // A reversal between the same accounts for the same amount is still a
+  // different request: the key was used to undo something, not to send money.
   const same =
+    prior.reverses_transfer_id === null &&
     prior.from_account_id === input.fromAccountId &&
     prior.to_account_id === input.toAccountId &&
     prior.amount_cents === input.amountCents;
@@ -167,14 +263,19 @@ async function replay(client: pg.PoolClient, input: TransferInput): Promise<Crea
   return { value: toTransfer(prior), replayed: true };
 }
 
-export async function getTransfer(pool: pg.Pool, id: string): Promise<Transfer> {
+export async function getTransfer(pool: pg.Pool, id: string): Promise<TransferDetail> {
   id = requireUuid(id, "transfer id");
-  const { rows } = await pool.query<TransferRow>(
-    "SELECT id, from_account_id, to_account_id, amount_cents, created_at FROM transfers WHERE id = $1",
+  const { rows } = await pool.query<TransferRow & { reversed_by_transfer_id: string | null }>(
+    `SELECT t.id, t.from_account_id, t.to_account_id, t.amount_cents, t.reverses_transfer_id, t.created_at,
+            r.id AS reversed_by_transfer_id
+       FROM transfers t
+       LEFT JOIN transfers r ON r.reverses_transfer_id = t.id
+      WHERE t.id = $1`,
     [id],
   );
-  if (!rows[0]) throw new NotFoundError(`transfer ${id} not found`);
-  return toTransfer(rows[0]);
+  const row = rows[0];
+  if (!row) throw new NotFoundError(`transfer ${id} not found`);
+  return { ...toTransfer(row), reversed_by_transfer_id: row.reversed_by_transfer_id };
 }
 
 function translatePgError(err: unknown): unknown {
@@ -182,6 +283,8 @@ function translatePgError(err: unknown): unknown {
   // FK violation on the transfers insert: one of the accounts doesn't exist.
   if (pgErr.code === "23503") return new NotFoundError("account not found");
   if (pgErr.code === "23514" && pgErr.constraint === "balance_js_safe") return new BalanceLimitError();
+  // Lost the race to reverse this transfer to a request with a different key.
+  if (pgErr.code === "23505" && pgErr.constraint === "one_reversal_per_transfer") return new AlreadyReversedError();
   // balance_non_negative should be unreachable (funds are checked under the
   // lock). If it ever fires, it's a bug: let it surface as a 500, the
   // transaction has already rolled back.

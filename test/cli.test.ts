@@ -156,6 +156,40 @@ describe("transfer", () => {
   });
 });
 
+describe("reverse", () => {
+  it("returns the money, once, and shows it in history", async () => {
+    const a = await open("100");
+    const b = await open("0");
+    const sent = await cliJson("transfer", a, b, "25.50", "--key", "t1");
+    const id = sent.json.transfer.id;
+
+    const res = await cli("reverse", id, "--key", "r1");
+    expect(res.code).toBe(EXIT.ok);
+    expect(res.out).toMatch(
+      new RegExp(`^Reversed transfer ${id}: returned 25\\.50 CAD from ${b} to ${a} \\(reversal [0-9a-f-]{36}\\)\\.$`),
+    );
+    expect(await balanceCents(a)).toBe(10000);
+
+    const again = await cli("reverse", id, "--key", "r1");
+    expect(again.code).toBe(EXIT.ok);
+    expect(again.out).toMatch(/^Already applied: .* No money moved this time\.$/);
+
+    const other = await cliJson("reverse", id, "--key", "r2");
+    expect(other.code).toBe(EXIT.refused);
+    expect(JSON.parse(other.err)).toMatchObject({ error: "already_reversed" });
+    expect(await balanceCents(a)).toBe(10000);
+
+    const history = (await cli("history", a)).out.split("\n");
+    expect(history[1]).toMatch(new RegExp(`reversal\\s+\\+25\\.50\\s+100\\.00\\s+from ${b} \\(reverses ${id}\\)$`));
+  });
+
+  it("requires --key", async () => {
+    const res = await cli("reverse", "00000000-0000-4000-8000-000000000000");
+    expect(res.code).toBe(EXIT.usage);
+    expect(res.err).toMatch(/needs --key/);
+  });
+});
+
 describe("history", () => {
   it("lists entries newest first, with counterparties", async () => {
     const a = await open("100");

@@ -40,6 +40,7 @@ Defaults: `DATABASE_URL=postgres://localhost:5432/move_money`, `TEST_DATABASE_UR
 move-money open <amount> [--key <key>]
 move-money balance <account-id>
 move-money transfer <from-account-id> <to-account-id> <amount> --key <key>
+move-money reverse <transfer-id> --key <key>
 move-money history <account-id> [--limit <n>]
 move-money migrate
 ```
@@ -68,9 +69,10 @@ when                      kind      amount  balance  counterparty
 ```
 
 - **Amounts** are dollars with at most two decimal places (`25`, `25.5`, `25.50`). Anything that can't be represented exactly in cents is refused, never rounded: `25.555`, `1e3`, `-5`, `$5`, `1,000`.
-- **`--key`** is required for `transfer`. Use a fresh key for each transfer you intend, and reuse it if you retry. Running the same command twice, whether from a double Enter, shell history or a retry loop in a script, then moves the money only once. Reusing a key with a different amount or different accounts is refused.
+- **`reverse`** undoes a transfer in full. It moves the same amount back from the recipient to the sender, recorded as a new transfer that points at the original. History shows it as `reversal`. A transfer can be reversed once. A reversal is refused if the recipient no longer has the money, because the rule against negative balances still applies.
+- **`--key`** is required for `transfer` and `reverse`. Use a fresh key for each transfer you intend, and reuse it if you retry. Running the same command twice, whether from a double Enter, shell history or a retry loop in a script, then moves the money only once. Reusing a key with a different amount or different accounts is refused.
 - **`--json`** gives machine-readable output on stdout. Errors go to stderr as `{"error": code, "message"}`.
-- **Exit codes:** `0` success · `1` refused (insufficient funds, not found, key conflict, balance limit) · `2` bad usage (including negative or sub-cent amounts) · `3` unexpected error.
+- **Exit codes:** `0` success · `1` refused (insufficient funds, not found, key conflict, balance limit, already reversed) · `2` bad usage (including negative or sub-cent amounts) · `3` unexpected error.
 
 ## Running the tests
 
@@ -127,6 +129,7 @@ Around that test:
 - **The idempotency key lives on the transfer row and commits atomically with it.** No separate idempotency store can get out of sync. A replay returns the original transfer even if the balance has changed since. Reusing a key with a different request is refused rather than silently replayed.
 - **`--key` is required, not auto-generated.** An auto-generated key would differ on every run, so re-running the command would move the money twice. That's exactly the failure rule 3 is about.
 - **A rejected attempt doesn't consume its key.** The rejection rolls back the key along with everything else. If you retry after the account is funded, the transfer goes through. That suits "retry until it works", but it does mean a retry can succeed where the first attempt failed. The alternative is to store failed outcomes and replay them. It's tested either way, and it's the decision I'd most want to discuss.
+- **A reversal is a transfer, not a new kind of ledger entry.** It is a `transfers` row with `reverses_transfer_id` set, and it goes through the same lock, funds check and debit/credit path, so every rule and invariant covers it without extra code. The database makes sure it mirrors the original: a composite foreign key requires the accounts swapped and the same amount, and a unique index allows one reversal per transfer, even under concurrent requests with different keys. Only full reversals are supported. "Can't reverse a reversal" is checked in application code, because enforcing it in the database would need a trigger.
 - **Keys are global, not per-account.** That's simpler. A collision is treated as a conflict, not a second transfer.
 
 ## What went wrong, and how it was caught
@@ -152,7 +155,8 @@ I also checked that the tests can fail. With the lock deleted from the real code
 - Deposits and withdrawals from outside the system. Money only enters through opening balances.
 - Recording failed transfer attempts, and expiring idempotency keys (they currently live forever).
 - Pagination beyond `--limit` on history.
-- An ORM or migration framework. There's one SQL file and a ~50-line runner.
+- Partial refunds. A reversal always returns the whole amount.
+- An ORM or migration framework. There are plain SQL files and a ~50-line runner.
 
 ## What I'd do next
 
@@ -167,10 +171,11 @@ I also checked that the tests can fail. With the lock deleted from the real code
 
 ```
 db/migrations/001_init.sql   schema and the CHECK/UNIQUE backstops
+db/migrations/002_reversals.sql  reversal link, one-per-transfer and mirror constraints
 src/cli.ts                   the move-money command
 src/money.ts                 amount parsing/formatting, exact to the cent
 src/validate.ts              id and idempotency-key validation
-src/ledger/transfer.ts       the transfer transaction
+src/ledger/transfer.ts       the transfer and reversal transactions
 src/ledger/accounts.ts       open account, balance, history
 src/db/pool.ts               pool, int8 parser, withTransaction
 test/helpers.ts              assertInvariants()

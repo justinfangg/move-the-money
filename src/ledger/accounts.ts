@@ -99,10 +99,12 @@ export async function listTransactions(
     amount_cents: number;
     balance_after_cents: number;
     transfer_id: string | null;
+    reverses_transfer_id: string | null;
     counterparty_account_id: string | null;
     created_at: Date;
   }>(
     `SELECT l.id, l.kind, l.amount_cents, l.balance_after_cents, l.transfer_id, l.created_at,
+            t.reverses_transfer_id,
             CASE l.kind WHEN 'debit'  THEN t.to_account_id
                         WHEN 'credit' THEN t.from_account_id END AS counterparty_account_id
        FROM ledger_entries l
